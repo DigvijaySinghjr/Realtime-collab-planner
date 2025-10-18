@@ -1,12 +1,17 @@
 import express from 'express';
 import bodyParser from 'body-parser';
+import mongoose from 'mongoose';
 import connect from './config/db_config.js';
 
-import 'dotenv/config'
+import passport from 'passport';
+import './config/passport-config.js';
 
+import session from 'express-session';
+import 'dotenv/config';
 
-
-import { addAssociateNotes, removeAssociateNotes } from '../helper.js';
+import { can } from './middleware/auth.js';
+import NoteMembership from './model/noteMembership.js';
+import Role from './model/role.js';
 
 import NoteRepository from './repository/note-repository.js';
 import UserRepository from './repository/user-repository.js';
@@ -20,155 +25,210 @@ const port = 3000;
 app.use(bodyParser.json())
 app.use(bodyParser.urlencoded({ extended: false }));
 
+app.use(session({ 
+  secret: process.env.SESSION_SECRET || 'keyboard cat', // Use environment variable for secret
+  resave: false, // More efficient setting
+  saveUninitialized: false // More efficient setting
+  // For production, add: store: MongoStore.create({ mongoUrl: process.env.MONGO_URI })
+}));
+app.use(passport.initialize());
+app.use(passport.session());
 
-app.post('/createUser', async (req, res) =>{                  //create user
-    console.log('req reqched for creating');
-    console.log(req.body);
-    const user = await userRepository.create({
-        name: req.body.name,
-        associateNotes: req.body.associateNotes
+// Simple middleware to check if the user is authenticated
+const isAuthenticated = (req, res, next) => {
+  if (req.isAuthenticated()) {
+    return next();
+  }
+  res.status(401).json({ message: 'Authentication required. Please log in.' });
+};
+
+
+// GET route to show login form
+app.get('/login', (req, res) => {
+  const errorMessage = req.query.error ? '<p style="color: red;">Login failed. Please try again.</p>' : '';
+  res.send(`
+    <h2>Login</h2>
+    ${errorMessage}
+    <form action="/login" method="post">
+      <input type="email" name="email" placeholder="Email" required><br><br>
+      <input type="password" name="password" placeholder="Password" required><br><br>
+      <button type="submit">Login</button>
+    </form>
+    <p><a href="/createUser">Create Account</a></p>
+  `);
+});
+
+// GET route to show user creation form
+app.get('/createUser', (req, res) => {
+  res.send(`
+    <h2>Create Account</h2>
+    <form action="/createUser" method="post">
+      <input type="text" name="name" placeholder="Name" required><br><br>
+      <input type="email" name="email" placeholder="Email" required><br><br>
+      <input type="password" name="password" placeholder="Password" required><br><br>
+      <button type="submit">Create Account</button>
+    </form>
+    <p><a href="/login">Back to Login</a></p>
+  `);
+});
+
+//POST route to handle login, show user data if successful
+app.post('/login', 
+    passport.authenticate('local', { failureRedirect: '/login?error=1' }), 
+    function(req, res) {
+      console.log('Login successful, user:', req.user);
+      res.json({ message: 'Login successful!', user: req.user });
     });
-    console.log('user created');
-    res.json(user);
-})
 
 
 
-app.post('/addNotes', async (req, res) => {       // creating notes
-    const note = await noteRepository.create({
-        content: req.body.content,
-        //contributors: req.body.contributors
-        owner: req.body.userId                   
-    });
-
-    // Add the note to the user's associateNotes list
-    addAssociateNotes(req.body.userId, note.id);                 //id of note is genrated just above
-
-    console.log('no response was send');
-    res.json(note);
-})
-
-
-// The noteId should be provided as a route parameter, not a literal string.
-// So, use :noteId in the route to get it from the URL.
-app.patch('/updateNotes/:noteId', async (req, res) => {
+app.post('/createUser', async (req, res) => {
     try {
-        const note = await noteRepository.update(req.params.noteId, {
-            content: req.body.content
+        const { name, email, password } = req.body;
+        const user = await userRepository.create({
+            name,
+            email: email.trim(),
+            password        //we'll do hashing later 
         });
-        return res.json(note)
+        console.log('User created:', user.email);
+        // Exclude password from the response
+        const userResponse = user.toObject();
+        delete userResponse.password;
+        res.status(201).json(userResponse);
     } catch (error) {
-        console.log('failed to update the notes', error);
-        res.status(500).json({ error: 'failed to update note' });
-    }
-})
-
-app.get('/getNotes/:noteId', async (req, res) => {          
-    try {
-        const userId = req.query.userId;               // fetch userId from query parameter
-        if (!userId) {
-            return res.status(400).json({ error: 'userId is required' });
+        console.error('Error creating user:', error);
+        // Handle duplicate email error
+        if (error.code === 11000) {
+            return res.status(409).json({ error: 'Email already exists.' });
         }
-        const note = await noteRepository.getForUser(req.params.noteId, userId);
-        if (!note) {
-            return res.status(404).json({ error: 'Note not found or no access' });
-        }
-        return res.json(note)
-    } catch (error) {
-        console.error('failed to fetch notes:', error);
-        res.status(500).json({error: 'failed to fetch note'});
-    }
-})
-
-app.get('/getAllNotes', async (req, res) => {          
-    try {                                                  // fetch userId from query parameter
-        const userId = req.query.userId;
-        if (!userId) {
-            return res.status(400).json({ error: 'userId is required' });
-        }
-        const notes = await noteRepository.getAllForUser(userId);
-        return res.json(notes)
-    } catch (error) {
-        console.error('failed to fetch notes:', error);
-        res.status(500).json({error: 'failed to fetch notes'});
-    }
-})
-
-app.delete('/deleteNotes/:noteId', async (req, res) => {
-    try {
-        const notes = await noteRepository.destroy(req.params.noteId)
-        return res.json(notes)
-    } catch (error) {
-        console.error('failed to delete the note:', error);
-        res.status(500).json({error: 'failed to delete note'});
-    }
-})
-
-app.patch('/removeContributor', async (req, res) => {
-    try {
-        const note = await noteRepository.get(req.body.noteId);
-        const idx = note.contributors.indexOf(req.body.userId);
-        if (idx !== -1) {
-            note.contributors.splice(idx, 1);
-            await noteRepository.update(req.body.noteId, { contributors: note.contributors });
-            removeAssociateNotes(req.body.userId, req.body.noteId);
-        }
-        res.json({ contributors: note.contributors });
-    } catch (error) {
-        console.error('failed to remove contributor:', error);
-        res.status(500).json({ error: 'failed to remove contributor' });
+        res.status(500).json({ error: 'Failed to create user.' });
     }
 });
 
 
-app.patch('/addContributor', async (req, res) => {      // we'll get user's id from frontend
+
+app.post('/addNotes', isAuthenticated, async (req, res) => {
+    const session = await mongoose.startSession();
     try {
-        // Fetch the note by its id
-        const note = await noteRepository.get(req.body.noteId);
-        console.log(req.body.noteId);
+        session.startTransaction();
 
-        // Check if userId is already a contributor
-        if (!note.contributors.includes(req.body.userId)) {
-            note.contributors.push(req.body.userId);
-
-            // Update the note's contributors array in the database
-            await noteRepository.update(req.body.noteId, { contributors: note.contributors });
-
-            // Add the note to the user's associateNotes list
-            addAssociateNotes(req.body.userId, req.body.noteId);
-
-        } else {
-            console.log('this user is already present as contributor');
+        // 1. Find the 'Owner' role ID
+        const ownerRole = await Role.findOne({ name: 'Owner' }).lean();
+        if (!ownerRole) {
+            return res.status(500).json({ error: '"Owner" role not found. Please seed the database.' });
         }
- 
-        console.log(note.contributors);
 
-        res.json({ contributors: note.contributors });
+        // 2. Create the note within the transaction
+        const [note] = await noteRepository.model.create([{
+            content: req.body.content,
+            title: req.body.title // Also handle title if provided
+        }], { session });
+
+        // 3. Create a membership linking the user, note, and role
+        await NoteMembership.create([{
+            userId: req.user.id,
+            noteId: note._id,
+            roleId: ownerRole._id,
+        }], { session });
+
+        await session.commitTransaction();
+
+        console.log(`Note created and ownership assigned to user ${req.user.id}`);
+        res.status(201).json(note);
     } catch (error) {
-        console.error('Error fetching note:', error);
-        res.status(500).json({ error: 'Failed to fetch note' });
+        await session.abortTransaction();
+        console.error('Error creating note:', error);
+        res.status(500).json({ error: 'Failed to create note' });
+    } finally {
+        session.endSession();
     }
-})
+});
 
-app.patch('/addAssociateNotes', async(req, res) => {   
+
+// The noteId should be provided as a route parameter, not a literal string.
+// So, use :noteId in the route to get it from the URL.
+app.patch('/updateNotes/:noteId', isAuthenticated, can('edit_note_content'), async (req, res) => {
     try {
-        const associateNotes = await addAssociateNotes(req.body.userId, req.body.noteId)     //calling helper func
-        res.json( {associateNotes} );
-    } catch (error) {
-        console.error('Failed to add Associate note:', error);
-        res.status(500).json({ error: 'Failed to add Associate note' });
-    }
-})
+        const updateData = {};
+        if (req.body.content) updateData.content = req.body.content;
+        if (req.body.title) updateData.title = req.body.title;
 
-app.patch('/removeAssociateNotes', async(req, res) => {
-    try {
-        const associateNotes = await removeAssociateNotes(req.body.userId, req.body.noteId)        //calling helper fun
-        res.json( { associateNotes });
+        const note = await noteRepository.update(req.params.noteId, {
+            ...updateData
+        });
+        return res.json(note);
     } catch (error) {
-        console.error('Failed to remove Associate note: ', error);
-        res.status(500).json({ error: 'Failed to remove Associate note' });
+        console.log('failed to update the notes', error);
+        res.status(500).json({ error: 'failed to update note' });
     }
-})
+});
+
+app.get('/getNotes/:noteId', isAuthenticated, can('read_note'), async (req, res) => {
+    try {
+        const note = await noteRepository.get(req.params.noteId);
+        return res.json(note);
+    } catch (error) {
+        console.error('failed to fetch notes:', error);
+        res.status(500).json({error: 'failed to fetch note'});
+    }
+});
+
+app.get('/getAllNotes', isAuthenticated, async (req, res) => {
+    try {
+        // This aggregation is more efficient. It finds all memberships for the user,
+        // then joins them with the corresponding note and role in a single database query.
+        const notes = await NoteMembership.aggregate([
+            { $match: { userId: new mongoose.Types.ObjectId(req.user.id) } },
+            {
+                $lookup: {
+                    from: 'notes', // The collection name for the Note model
+                    localField: 'noteId',
+                    foreignField: '_id',
+                    as: 'noteDetails'
+                }
+            },
+            { $unwind: '$noteDetails' }, // Deconstruct the noteDetails array
+            {
+                $project: { // Reshape the output to be clean
+                    _id: '$noteDetails._id',
+                    title: '$noteDetails.title',
+                    content: '$noteDetails.content',
+                    createdAt: '$noteDetails.createdAt',
+                    updatedAt: '$noteDetails.updatedAt'
+                }
+            }
+        ]);
+        return res.json(notes);
+    } catch (error) {
+        console.error('failed to fetch notes:', error);
+        res.status(500).json({error: 'failed to fetch notes'});
+    }
+});
+
+app.delete('/deleteNotes/:noteId', isAuthenticated, can('delete_note'), async (req, res) => {
+    const session = await mongoose.startSession();
+    try {
+        session.startTransaction();
+        const noteId = req.params.noteId;
+        const note = await noteRepository.model.findByIdAndDelete(noteId, { session });
+
+        if (!note) {
+            return res.status(404).json({ message: 'Note not found' });
+        }
+
+        // Also clean up all memberships associated with the deleted note
+        await NoteMembership.deleteMany({ noteId: noteId }, { session });
+
+        await session.commitTransaction();
+        return res.json({ message: 'Note and all associated memberships deleted successfully', note });
+    } catch (error) {
+        await session.abortTransaction();
+        console.error('failed to delete the note:', error);
+        res.status(500).json({error: 'failed to delete note'});
+    } finally {
+        session.endSession();
+    }
+});
 
 
 app.listen(port, async () => {
