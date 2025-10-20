@@ -88,7 +88,7 @@ app.post('/createUser', async (req, res) => {
         const user = await userRepository.create({
             name,
             email: email.trim(),
-            password        //we'll do hashing later 
+            password // The pre-save hook in the User model will hash this automatically
         });
         console.log('User created:', user.email);
         // Exclude password from the response
@@ -172,6 +172,201 @@ app.get('/getNotes/:noteId', isAuthenticated, can('read_note'), async (req, res)
         res.status(500).json({error: 'failed to fetch note'});
     }
 });
+
+/**
+ * Endpoint to change a collaborator's role on a note.
+ * Only one owner can be present at a time according to this logic.
+ * Only the current owner of a note can perform this action.
+ */
+// app.put('/notes/:noteId/collaborators/:targetUserId', isAuthenticated, async (req, res) => {
+//     const { noteId, targetUserId } = req.params;
+//     const { roleName } = req.body; // e.g., "Owner", "Manager", "Editor"
+//     const currentUserId = req.user.id;
+
+//     if (!roleName) {
+//         return res.status(400).json({ error: 'roleName is required in the request body.' });
+//     }
+
+//     const session = await mongoose.startSession();
+
+//     try {
+//         session.startTransaction();
+
+//         // 1. Verify the current user is the owner of the note.
+//         const ownerRole = await Role.findOne({ name: 'Owner' }).session(session).lean();
+//         if (!ownerRole) return res.status(500).json({ error: '"Owner" role not found.' });
+
+//         const currentUserMembership = await NoteMembership.findOne({
+//             noteId: noteId,
+//             userId: currentUserId,
+//             roleId: ownerRole._id
+//         }).session(session);
+
+//         if (!currentUserMembership) {
+//             return res.status(403).json({ error: 'Forbidden: Only the note owner can change roles.' });
+//         }
+
+//         // 2. Find the target role.
+//         const targetRole = await Role.findOne({ name: roleName }).session(session).lean();
+//         if (!targetRole) return res.status(400).json({ error: `Role "${roleName}" not found.` });
+
+//         // --- SPECIAL OWNERSHIP TRANSFER LOGIC ---
+//         if (targetRole.name === 'Owner') {
+//             if (currentUserId === targetUserId) {
+//                 return res.status(400).json({ error: 'You are already the owner.' });
+//             }
+
+//             // Find the 'Manager' role to demote the current owner to.
+//             const managerRole = await Role.findOne({ name: 'Manager' }).session(session).lean();
+//             if (!managerRole) return res.status(500).json({ error: '"Manager" role not found for ownership transfer.' });
+
+//             // a) Demote current owner to Manager.
+//             currentUserMembership.roleId = managerRole._id;
+//             await currentUserMembership.save({ session });
+
+//             // b) Promote target user to Owner.
+//             // Use findOneAndUpdate with upsert to handle cases where the target user is not yet a collaborator.
+//             await NoteMembership.findOneAndUpdate(
+//                 { noteId: noteId, userId: targetUserId },
+//                 { $set: { roleId: targetRole._id } },
+//                 { upsert: true, new: true, session: session }
+//             );
+
+//             await session.commitTransaction();
+//             return res.status(200).json({ message: 'Ownership successfully transferred.' });
+//         }
+
+//         // --- STANDARD ROLE CHANGE LOGIC ---
+//         // For any role other than 'Owner', simply update or create the membership.
+//         const updatedMembership = await NoteMembership.findOneAndUpdate(
+//             { noteId: noteId, userId: targetUserId },
+//             { $set: { roleId: targetRole._id } },
+//             { upsert: true, new: true, session: session }
+//         );
+
+//         await session.commitTransaction();
+//         res.status(200).json({ message: `User role updated to ${roleName}.`, membership: updatedMembership });
+
+//     } catch (error) {
+//         await session.abortTransaction();
+//         console.error('Error changing collaborator role:', error);
+//         res.status(500).json({ error: 'Failed to change collaborator role.' });
+//     } finally {
+//         session.endSession();
+//     }
+// });
+
+
+ 
+/*
+ * Endpoint to change a collaborator's role on a note.
+ * Only the current owner of a note can perform this action.
+ * More than one owner can be present according to this logic.
+ */
+app.post('/changeRoles', async(req, res) => {               //authorization not set up here for now
+    const { noteId, targetUserId, currentUserId, targetRole } = req.body;
+    
+    const session = await mongoose.startSession();
+
+    try {
+        // Verify current user is owner of the note (Authorization)
+        const currentUserNoteMembership = await NoteMembership.findOne({
+            noteId: noteId,
+            userId: currentUserId
+        });
+        
+        if(!currentUserNoteMembership){
+            return res.status(400).json({error: 'current user is not a collaborator of the note'});
+        }
+
+       currentUserRole = await Role.findById(currentUserNoteMembership.roleId);
+       if(currentUserRole.name !== 'Owner'){
+            return res.status(403).json({error: 'only owner can change collaborator roles'});
+       }
+
+        const userRole = await Role.findOne({name: 'Owner'})  
+       
+        session.startTransaction();
+
+        // Fetch note membership (remove roleId from query since we're changing it)
+        const noteMembership = await NoteMembership.findOne({
+            noteId: noteId, 
+            userId: targetUserId
+        }).session(session);
+        
+        if(!noteMembership){
+            await session.abortTransaction();
+            return res.status(400).json({error: 'note membership not found'});
+        }
+
+        // Find target role's id
+        const targetRoleDoc = await Role.findOne({name: targetRole}).session(session).lean();
+        if(!targetRoleDoc){
+            await session.abortTransaction();
+            return res.status(400).json({error: 'role not found'});
+        }
+
+        // Update role
+        noteMembership.roleId = targetRoleDoc._id;
+        await noteMembership.save({session});
+
+        await session.commitTransaction();
+        return res.status(200).json({message: 'role changed successfully'});
+        
+    } catch (error) {
+        await session.abortTransaction();
+        console.error('error occurred while changing the role:', error);
+        return res.status(500).json({error: 'failed to change collaborator role'});
+    } finally {
+        session.endSession();
+    }
+});
+
+
+app.delete('/revokeAccess/:noteId/:targetId', isAuthenticated, async (req, res) => {
+    try {
+        // 1. Owner cannot revoke their own access check (Good check!)
+        if (req.user.id === req.params.targetId) {
+            return res.status(400).json({ error: 'owners cannot revoke their own access' });
+        }
+
+        // 2. Verify if current user is owner
+        const currentUserNoteMembership = await NoteMembership.findOne({
+            noteId: req.params.noteId,
+            userId: req.user.id,
+        });
+
+        if (!currentUserNoteMembership) {
+            return res.status(400).json({ error: 'current user is not a collaborator of the note' });
+        }
+        
+        // Use consistent variable naming (e.g., currentUSerRole -> currentUserRole)
+        const currentUserRole = await Role.findById(currentUserNoteMembership.roleId);
+        
+        // 3. Authorization check
+        if (currentUserRole.name !== 'Owner') {
+            return res.status(403).json({ error: 'only owner can revoke access' });
+        }
+        
+        // 4. Proceed to revoke access
+        const result = await NoteMembership.findOneAndDelete({
+            noteId: req.params.noteId,
+            userId: req.params.targetId,
+        });
+
+        if (!result) {
+            return res.status(404).json({ error: 'note membership not found' });
+        }
+        
+        return res.status(200).json({ message: 'access revoked successfully' });
+    } catch (error) {
+        console.error('failed to revoke access:', error);
+        // Best practice to avoid leaking database details in production
+        res.status(500).json({ error: 'An unexpected error occurred' }); 
+    }
+});
+
+
 
 app.get('/getAllNotes', isAuthenticated, async (req, res) => {
     try {

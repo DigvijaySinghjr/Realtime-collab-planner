@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 const { Schema } = mongoose;
+import bcrypt from 'bcrypt';
 
 const userSchema = mongoose.Schema({
     name: {
@@ -20,9 +21,19 @@ const userSchema = mongoose.Schema({
       }
 }, {timestamps: true});
 
-// Add verifyPassword method
+// Hash the password before saving the user
+userSchema.pre('save', function(next) {
+  bcrypt.hash(this.password, 10, (err, hash) => {
+    if (err) {
+      return next(err);
+    }
+    this.password = hash;
+    next();
+  });
+});
+
 userSchema.methods.verifyPassword = function(password) {
-  return this.password === password;
+  return bcrypt.compareSync(password, this.password);
 };
 
 const User = mongoose.model('User', userSchema);
