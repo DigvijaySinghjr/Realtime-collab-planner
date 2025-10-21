@@ -1,3 +1,6 @@
+// Load environment variables from .env file at the very beginning
+import 'dotenv/config';
+
 import express from 'express';
 import bodyParser from 'body-parser';
 import mongoose from 'mongoose';
@@ -7,7 +10,6 @@ import passport from 'passport';
 import './config/passport-config.js';
 
 import session from 'express-session';
-import 'dotenv/config';
 
 import { can } from './middleware/auth.js';
 import NoteMembership from './model/noteMembership.js';
@@ -16,11 +18,14 @@ import Role from './model/role.js';
 import NoteRepository from './repository/note-repository.js';
 import UserRepository from './repository/user-repository.js';
 
+// Import the configured email transporter
+import transporter from './config/email_config.js';
+
 const noteRepository = new NoteRepository();
 const userRepository = new UserRepository();
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000; // Provide a default port
 
 app.use(bodyParser.json())
 app.use(bodyParser.urlencoded({ extended: false }));
@@ -81,7 +86,6 @@ app.post('/login',
     });
 
 
-
 app.post('/createUser', async (req, res) => {
     try {
         const { name, email, password } = req.body;
@@ -91,6 +95,23 @@ app.post('/createUser', async (req, res) => {
             password // The pre-save hook in the User model will hash this automatically
         });
         console.log('User created:', user.email);
+
+        // Send a welcome email if the transporter is configured
+        if (transporter) {
+            try {
+                await transporter.sendMail({
+                    from: `"Realtime Planner" <${process.env.SENDER_EMAIL}>`, // Sender address
+                    to: user.email, // Recipient: the new user's email
+                    subject: "Welcome to Realtime Collab Planner! ✔", // Subject line
+                    text: `Hello ${user.name},\n\nWelcome to the Realtime Collab Planner. We're excited to have you on board!`, // Plain text body
+                    html: `<b>Hello ${user.name},</b><br><br>Welcome to the Realtime Collab Planner. We're excited to have you on board!`, // HTML body
+                });
+                console.log('Welcome email sent to:', user.email);
+            } catch (emailError) {
+                console.error('Failed to send welcome email:', emailError);
+            }
+        }
+
         // Exclude password from the response
         const userResponse = user.toObject();
         delete userResponse.password;
