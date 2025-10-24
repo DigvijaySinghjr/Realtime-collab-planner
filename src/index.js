@@ -9,19 +9,22 @@ import connect from './config/db_config.js';
 import passport from 'passport';
 import './config/passport-config.js';
 
+import jwt from 'jsonwebtoken';
 import session from 'express-session';
 
 import { can } from './middleware/auth.js';
 import NoteMembership from './model/noteMembership.js';
 import Role from './model/role.js';
 
-import NoteRepository from './repository/note-repository.js';
-import UserRepository from './repository/user-repository.js';
+import UserRepository from './repository/user-repository.js'; // NoteRepository is unused in this file
 
 // Import the configured email transporter
 import transporter from './config/email_config.js';
 
-const noteRepository = new NoteRepository();
+import './config/jwt_config.js';
+import Invitation from './model/invitation.js';
+import User from './model/user.js';
+import Note from './model/note.js'; // Import Note model for updates
 const userRepository = new UserRepository();
 
 const app = express();
@@ -126,6 +129,145 @@ app.post('/createUser', async (req, res) => {
     }
 });
 
+/**
+ * Serves a basic HTML form to test sending invitations.
+ * Must be logged in to access.
+ */
+app.get('/invite', (req, res) => {
+  if (req.isAuthenticated()) {
+    // If user is logged in, show the invitation form
+    res.send(`
+      <h2>Invite a Collaborator</h2>
+      <p>You are logged in as: ${req.user.email}</p>
+      <form action="/inviteUser" method="post">
+        <label for="noteId">Note ID:</label><br>
+        <input type="text" id="noteId" name="noteId" required style="width: 300px;"><br><br>
+        <label for="email">Email to invite:</label><br>
+        <input type="email" id="email" name="email" required style="width: 300px;"><br><br>
+        <label for="roleName">Role (e.g., Editor, Viewer):</label><br>
+        <input type="text" id="roleName" name="roleName" value="Editor" required style="width: 300px;"><br><br>
+        <button type="submit">Send Invitation</button>
+      </form>
+    `);
+  } else {
+    // If user is not logged in, show the login form
+    const errorMessage = req.query.error ? '<p style="color: red;">Login failed. Please try again.</p>' : '';
+    res.send(`
+      <h2>Login to Invite Collaborators</h2>
+      ${errorMessage}
+      <form action="/login" method="post">
+        <input type="email" name="email" placeholder="Email" required><br><br>
+        <input type="password" name="password" placeholder="Password" required><br><br>
+        <button type="submit">Login</button>
+      </form>
+      <p><a href="/createUser">Create Account</a></p>
+    `);
+  }
+});
+
+
+app.post('/inviteUser', isAuthenticated, async (req, res) => {
+    try {
+        const { noteId, email, roleName } = req.body;
+        const sentBy = req.user.id;
+
+        // 1. Find the role by its name
+        const role = await Role.findOne({ name: roleName }).lean();
+        if (!role) {
+            return res.status(404).json({ error: 'Role not found' });
+        }
+
+        // 2. Check if the user is already a collaborator on this note
+        const existingUser = await User.findOne({ email: email }).lean();
+        if (existingUser) {
+            const existingMembership = await NoteMembership.findOne({ noteId: noteId, userId: existingUser._id });
+            if (existingMembership) {
+                return res.status(409).json({ error: 'This user is already a collaborator on this note.' });
+            }
+        }
+
+        // 3. Generate a JWT for the invitation.
+        const invitationPayload = {
+            email: email,
+            noteId: noteId,
+            roleId: role._id,
+        };
+        const invitationToken = jwt.sign(
+            invitationPayload,
+            'your-super-secret-invitation-key', // Hardcoded secret as requested
+            { expiresIn: '24h' }
+        );
+
+        // 4. Create the invitation record in the database
+        await Invitation.create({
+            sentBy: sentBy,
+            noteId: noteId,
+            email: email,
+            roleId: role._id,
+            token: invitationToken,
+            expiresAt: new Date(Date.now() + 60 * 1000), // Expires in 1 minute
+        });
+
+        // 5. Send the invitation email with a link to accept
+        if (transporter) {
+            try {
+                const invitationLink = `http://localhost:3000/accept-invitation?token=${invitationToken}`;
+
+                await transporter.sendMail({
+                    from: `"Realtime Planner" <${process.env.SENDER_EMAIL}>`, // Use environment variable for sender email
+                    to: email,
+                    subject: "You're invited to collaborate on a Note! ✔",
+                    text: `You have been invited to collaborate. Click this link to accept: ${invitationLink}`,
+                    html: `<b>You have been invited to collaborate.</b><br><a href="${invitationLink}">Click here to accept the invitation.</a>`
+                });
+                console.log('Invitation email sent to:', email);
+            } catch (emailError) {
+                console.error('Failed to send invitation email:', emailError);
+                return res.status(500).json({ error: 'Failed to send invitation email.' });
+            }
+        }
+
+        res.status(200).json({ message: 'Invitation sent successfully.' });
+
+    } catch (error) {
+        if (error.code === 11000) { // Handles the unique index violation from the Invitation model
+            return res.status(409).json({ error: 'An active invitation for this user on this note already exists.' });
+        }
+        console.error('Failed to invite user:', error);
+        res.status(500).json({ error: 'Failed to invite user.' });
+    }
+})
+
+
+
+app.post('/accept-invitation', isAuthenticated, async(req, res) => {
+    try {
+        const { token } = req.query;
+        const decodeToken = jwt.verify(token,  'your-super-secret-invitation-key', ); // hardcoded secret for now
+        const { email, noteId, roleId } = decodeToken;
+
+        const ifInvited = await Invitation.findOne({  token: token });  //since token is unique, and  it contains all info we need
+        if (!ifInvited) {
+            return res.status(400).json({ error: 'Invalid or expired invitation token'});
+        }
+        // create the noteMembership
+        await NoteMembership.create({
+            userId : req.user.id,
+            noteId: noteId,
+            roleId: roleId
+        });
+
+        //delete the invitation after accepting
+        await Invitation.deleteOne({ token: token});
+
+        console.log(`User ${req.user.id} accepted invitation to note ${noteId}`);
+        return res.status(200).json({ message: 'Invitation accepted successfully'});
+
+    } catch (error) {
+        console.error('Failed to accept invitation:', error);
+        return res.status(500).json({ error: 'Failed to accept invitation'})
+    }
+})
 
 
 app.post('/addNotes', isAuthenticated, async (req, res) => {
@@ -140,7 +282,7 @@ app.post('/addNotes', isAuthenticated, async (req, res) => {
         }
 
         // 2. Create the note within the transaction
-        const [note] = await noteRepository.model.create([{
+        const [note] = await Note.create([{
             content: req.body.content,
             title: req.body.title // Also handle title if provided
         }], { session });
@@ -174,7 +316,7 @@ app.patch('/updateNotes/:noteId', isAuthenticated, can('edit_note_content'), asy
         if (req.body.content) updateData.content = req.body.content;
         if (req.body.title) updateData.title = req.body.title;
 
-        const note = await noteRepository.update(req.params.noteId, {
+        const note = await Note.findByIdAndUpdate(req.params.noteId, {
             ...updateData
         });
         return res.json(note);
@@ -186,7 +328,7 @@ app.patch('/updateNotes/:noteId', isAuthenticated, can('edit_note_content'), asy
 
 app.get('/getNotes/:noteId', isAuthenticated, can('read_note'), async (req, res) => {
     try {
-        const note = await noteRepository.get(req.params.noteId);
+        const note = await Note.findById(req.params.noteId);
         return res.json(note);
     } catch (error) {
         console.error('failed to fetch notes:', error);
@@ -426,7 +568,7 @@ app.delete('/deleteNotes/:noteId', isAuthenticated, can('delete_note'), async (r
     try {
         session.startTransaction();
         const noteId = req.params.noteId;
-        const note = await noteRepository.model.findByIdAndDelete(noteId, { session });
+        const note = await Note.findByIdAndDelete(noteId, { session });
 
         if (!note) {
             return res.status(404).json({ message: 'Note not found' });

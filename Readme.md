@@ -30,6 +30,9 @@ Key features
 - User authentication (Passport.js integration in `src/config/passport-config.js`)
 - Note model with CRUD repository pattern (`model/`, `repository/`)
 - Lightweight server built with Express
+- Email-based collaborator invitations with expiring, secure tokens.
+- Advanced Role-Based Access Control (RBAC) for notes, managed via a `can()` middleware.
+- Endpoints for managing collaborator roles and revoking access.
 
 Quickstart (development)
 1. Install dependencies
@@ -55,6 +58,31 @@ Project layout
 - `routes/` - Express route handlers (e.g., `auth_route.js`)
 - `helper.js` - utility helpers
 
+## API Endpoints
+
+The application provides several key endpoints for managing notes and collaboration. All protected routes require the user to be authenticated.
+
+### User & Authentication
+- `POST /createUser`: Creates a new user account.
+- `POST /login`: Authenticates a user and starts a session.
+
+### Note Management
+- `POST /addNotes`: Creates a new note and assigns ownership to the creator.
+- `GET /getAllNotes`: Retrieves all notes the current user has access to.
+- `GET /getNotes/:noteId`: Retrieves a single note by its ID. Requires `read_note` permission.
+- `PATCH /updateNotes/:noteId`: Updates a note's content or title. Requires `edit_note_content` permission.
+- `DELETE /deleteNotes/:noteId`: Deletes a note and all associated memberships. Requires `delete_note` permission.
+
+### Collaboration & Invitations
+- `POST /inviteUser`: Sends an email invitation to a user to collaborate on a specific note with a given role.
+- `GET /accept-invitation`: Endpoint for the link in the invitation email. Verifies the token and grants the user access to the note. The user must be logged in to accept.
+
+### Role & Access Management
+- `POST /changeRoles`: Allows a note's 'Owner' to change the role of another collaborator on that note.
+- `DELETE /revokeAccess/:noteId/:targetId`: Allows a note's 'Owner' to remove a collaborator from a note.
+
+
+
 Development notes
 - Sessions: use `connect-mongo` to persist sessions to the database for production. The existing notes mention session storage; move that logic into `src/config/session.js` (create if missing).
 - Authorization: the project prefers role-based policies. Suggested roles and permissions (example):
@@ -63,20 +91,6 @@ Development notes
   - User: create:note, update:own_note, delete:own_note (ownership checks required)
   - Editor: update:any_note, delete:any_note, manage:group_settings (group membership checks required)
   - Admin: manage:roles, manage:users (global admin checks)
-
-Contribution guide
-- Open issues for bugs or feature requests.
-- Keep PRs small and focused.
-- Add tests for new model/repository logic.
-
-License & contact
-Add a `LICENSE` file if you want to publish as open source. Add contact info or a project maintainers section if desired.
-
-Notes
-This README is intentionally concise. If you want a more detailed developer guide (setup scripts, Docker, CI), say so and I can add it.
-
-
-
 
 
 
