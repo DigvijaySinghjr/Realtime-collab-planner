@@ -4,6 +4,7 @@ import 'dotenv/config';
 import express from 'express';
 import bodyParser from 'body-parser';
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import connect from './config/db_config.js';
 
 import passport from 'passport';
@@ -15,6 +16,7 @@ import session from 'express-session';
 import { can } from './middleware/auth.js';
 import NoteMembership from './model/noteMembership.js';
 import Role from './model/role.js';
+import ShareLink from './model/shareLink.js';
 
 import UserRepository from './repository/user-repository.js'; // NoteRepository is unused in this file
 
@@ -266,6 +268,83 @@ app.post('/accept-invitation', isAuthenticated, async(req, res) => {
     } catch (error) {
         console.error('Failed to accept invitation:', error);
         return res.status(500).json({ error: 'Failed to accept invitation'})
+    }
+})
+
+
+
+/**
+ * Creates a new public, shareable link for a note.
+ * The user must be authenticated. Authorization (e.g., can('share_note')) can be added later.
+ */
+app.post('/shareNotes', isAuthenticated, async (req, res) => {
+    try {
+        // 1. Get noteId and optional scope from the request body.
+        const { noteId, scope } = req.body;
+        const createdBy = req.user.id;
+
+        // 2. Generate a secure, random token. This is NOT a JWT.
+        // It's a simple, unique key to look up the ShareLink document.
+        const shareToken = crypto.randomBytes(32).toString('hex');
+
+        // 3. Create the ShareLink document in the database.
+        await ShareLink.create({
+            noteId: noteId,
+            token: shareToken,
+            createdBy: createdBy,
+            scope: scope || 'read-only', // Will use the schema's default ('read-only') if not provided
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+        });
+
+        // 4. Respond with the generated shareable link.
+        const sharableLink = `http://localhost:3000/view/${shareToken}`;
+        console.log(`Shareable link created for note ${noteId}: ${sharableLink}`);
+        return res.status(201).json({ sharableLink: sharableLink });
+    } catch (error) {
+        console.error('failed to share notes:', error);
+        return  res.status(500).json({error: 'failed to share notes'});
+    }
+})
+
+/**
+ * Serves a basic HTML form to test creating a shareable link.
+ */
+app.get('/share-test', isAuthenticated, (req, res) => {
+  res.send(`
+    <h2>Create a Shareable Link</h2>
+    <p>You are logged in as: ${req.user.email}</p>
+    <p>Enter the ID of a note you want to share publicly.</p>
+    <form action="/shareNotes" method="post">
+      <label for="noteId">Note ID to Share:</label><br>
+      <input type="text" id="noteId" name="noteId" required style="width: 300px;"><br><br>
+      <p>After submitting, you will get a JSON response with a 'sharableLink'. Copy that link and open it in a new browser tab (or an incognito window) to test the public view.</p>
+      <button type="submit">Generate Share Link</button>
+    </form>
+  `);
+});
+
+
+app.get('/view/:token', async (req, res) => {
+    try {
+        const { token } = req.params;
+
+        //find the share link by token
+        const shareLink = await ShareLink.findOne({ token: token})
+
+        if(!shareLink){
+             return res.status(404).json({ error: 'share Link not found or expired'});
+        }
+        //fetch the note associated with the shared link
+        const note = await Note.findById(shareLink.noteId);
+        if(!note){
+                   return res.status(404).json({ error: 'note not found'});
+        }
+               //since everything is valid, return the note content
+        return res.status(200).json({ note: note, scope: shareLink.scope});
+        
+    } catch (error) {
+        console.log('failed to access shared note:', error);
+        return res.status(500).json({error: 'failed to access shared note'});
     }
 })
 
