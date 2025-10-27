@@ -27,6 +27,7 @@ import './config/jwt_config.js';
 import Invitation from './model/invitation.js';
 import User from './model/user.js';
 import Note from './model/note.js'; // Import Note model for updates
+import NoteVersion from './model/NoteVersion.js';
 const userRepository = new UserRepository();
 
 const app = express();
@@ -324,7 +325,7 @@ app.get('/share-test', isAuthenticated, (req, res) => {
 });
 
 
-app.get('/view/:token', async (req, res) => {
+app.get('/view/:token', async (req, res) => {   //for viewing shared notes, no authentication needed
     try {
         const { token } = req.params;
 
@@ -349,8 +350,8 @@ app.get('/view/:token', async (req, res) => {
 })
 
 
-app.post('/addNotes', isAuthenticated, async (req, res) => {
-    const session = await mongoose.startSession();
+app.post('/addNotes', isAuthenticated, async (req, res) => { 
+    const session = await mongoose.startSession(); 
     try {
         session.startTransaction();
 
@@ -363,7 +364,8 @@ app.post('/addNotes', isAuthenticated, async (req, res) => {
         // 2. Create the note within the transaction
         const [note] = await Note.create([{
             content: req.body.content,
-            title: req.body.title // Also handle title if provided
+            title: req.body.title, // Also handle title if provided
+            // versionNumber default: 1
         }], { session });
 
         // 3. Create a membership linking the user, note, and role
@@ -387,31 +389,109 @@ app.post('/addNotes', isAuthenticated, async (req, res) => {
 });
 
 
-// The noteId should be provided as a route parameter, not a literal string.
-// So, use :noteId in the route to get it from the URL.
 app.patch('/updateNotes/:noteId', isAuthenticated, can('edit_note_content'), async (req, res) => {
+    const session = await mongoose.startSession();
     try {
+        session.startTransaction();
+
+        const noteId = req.params.noteId;
+        const userId = req.user.id;
+
+        // 1. Find the original note to create a version snapshot from it.
+        const originalNote = await Note.findById(noteId).session(session);
+        if (!originalNote) {
+            await session.abortTransaction();
+            return res.status(404).json({ error: 'Note not found' });
+        }
+
+        // 2. Create a new version document based on the *current* state of the note.
+        await NoteVersion.create([{
+            noteId: originalNote._id,
+            versionNumber: originalNote.versionNumber,
+            title: originalNote.title,
+            content: originalNote.content,
+            changedBy: userId
+        }], { session });
+
+        // 3. Prepare the update data and increment the version number on the main note.
         const updateData = {};
         if (req.body.content) updateData.content = req.body.content;
         if (req.body.title) updateData.title = req.body.title;
 
-        const note = await Note.findByIdAndUpdate(req.params.noteId, {
-            ...updateData
-        });
-        return res.json(note);
+        const updatedNote = await Note.findByIdAndUpdate(noteId, { ...updateData, $inc: { versionNumber: 1 } }, { new: true, session: session });
+
+       await session.commitTransaction();
+
+        return res.json(updatedNote);
     } catch (error) {
+        await session.abortTransaction();
         console.log('failed to update the notes', error);
         res.status(500).json({ error: 'failed to update note' });
     }
 });
 
-app.get('/getNotes/:noteId', isAuthenticated, can('read_note'), async (req, res) => {
+
+/**
+ * Reverts a note to a specific previous version.
+ */
+app.post('/notes/:noteId/revert', isAuthenticated, can('edit_note_content'), async (req, res) => {
+    const session = await mongoose.startSession();
+
     try {
-        const note = await Note.findById(req.params.noteId);
-        return res.json(note);
+        session.startTransaction();
+        const noteId = req.params.noteId;
+
+        const versionNumber = req.body.versionNumber;  // to which we want to revert
+        if(!versionNumber){
+            await session.abortTransaction();
+            return res.status(400).json({ error: 'versionNumber is required in the request body'});
+        } 
+        // 1. Find the target version to revert to.
+        const targetVersion = await NoteVersion.findOne({ noteId: noteId, versionNumber: versionNumber }).session(session);
+        if(!targetVersion){
+            await session.abortTransaction();
+            return res.status(404).json({ error: 'target version not faound'});
+        }
+        // 2. Update the main note with the content from the target version.
+        const updateNote = await Note.findByIdAndUpdate(noteId, {
+            content: targetVersion.content,
+            title: targetVersion.title,
+            $inc: { versionNumber: 1 } // Increment version number on revert
+        }, { new: true, session: session });
+
+        await session.commitTransaction();
+        return res.status(200).json({ 
+            message: `Note reverted to version ${versionNumber} successfully`, 
+            note: updateNote
+        });
+
     } catch (error) {
-        console.error('failed to fetch notes:', error);
-        res.status(500).json({error: 'failed to fetch note'});
+        await session.abortTransaction();
+        console.error('Error reverting note to previous version:', error);
+        res.status(500).json({ error: 'Failed to revert note to previous version' });
+    }
+
+   });
+
+
+/**
+ * Retrieves the version history for a specific note.
+ */
+app.get('/notes/:noteId/history', isAuthenticated, can('read_note'), async (req, res) => {
+    try {
+        const { noteId } = req.params;
+
+        // Find all versions for the given noteId and sort them from newest to oldest.
+        // The index on the NoteVersion model makes this query very efficient.
+        const history = await NoteVersion.find({ noteId: noteId })
+            .sort({ versionNumber: -1 })
+            .lean(); 
+
+        return res.status(200).json(history);
+
+    } catch (error) {
+        console.error('Failed to retrieve note history:', error);
+        res.status(500).json({ error: 'Failed to retrieve note history.' });
     }
 });
 
@@ -498,13 +578,6 @@ app.get('/getNotes/:noteId', isAuthenticated, can('read_note'), async (req, res)
 //     }
 // });
 
-
- 
-/*
- * Endpoint to change a collaborator's role on a note.
- * Only the current owner of a note can perform this action.
- * More than one owner can be present according to this logic.
- */
 app.post('/changeRoles', async(req, res) => {               //authorization not set up here for now
     const { noteId, targetUserId, currentUserId, targetRole } = req.body;
     

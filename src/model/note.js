@@ -11,6 +11,10 @@ const noteSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    versionNumber: {
+        type: Number,
+        default:1
+    },
     // Note: There are no 'owner' or 'contributors' fields here.
     // All user relationships are managed by the 'NoteMembership' model.
 }, {timestamps: true});
