@@ -19,5 +19,8 @@ const noteSchema = new mongoose.Schema({
     // All user relationships are managed by the 'NoteMembership' model.
 }, {timestamps: true});
 
+// Create a text index on the title and content fields for full-text search.
+noteSchema.index({ title: 'text', content: 'text' });
+
 const Note = mongoose.model('Note', noteSchema);
 export default Note;

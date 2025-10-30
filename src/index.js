@@ -388,6 +388,56 @@ app.post('/addNotes', isAuthenticated, async (req, res) => {
     }
 });
 
+/**
+ * Performs a full-text search across the title and content of notes
+ * that the authenticated user has access to.
+ * Usage: GET /search?q=your-search-term
+ */
+app.get('/search', isAuthenticated, async (req, res) => {
+    try {
+        const { q: searchTerm } = req.query;
+        const userId = new mongoose.Types.ObjectId(req.user.id);
+
+        if (!searchTerm) {
+            return res.status(400).json({ error: 'A search query parameter "q" is required.' });
+        }
+
+        // This aggregation pipeline is the most efficient way to perform an authorized search.
+        const results = await Note.aggregate([
+            // 1. Perform the text search first to narrow down the notes.
+            {
+                $match: {
+                    $text: { $search: searchTerm }
+                }
+            },
+            // 2. For the remaining notes, look up their memberships.
+            {
+                $lookup: {
+                    from: 'notememberships', // The collection name for NoteMembership
+                    localField: '_id',
+                    foreignField: 'noteId',
+                    as: 'memberships'
+                }
+            },
+            // 3. Filter these results to find notes where the current user is a member.
+            {
+                $match: {
+                    'memberships.userId': userId
+                }
+            },
+            // 4. Clean up the output by removing the memberships array.
+            {
+                $project: { memberships: 0 }
+            }
+        ]);
+
+        return res.status(200).json(results);
+    } catch (error) {
+        console.error('Error during search:', error);
+        res.status(500).json({ error: 'An error occurred during the search.' });
+    }
+});
+
 
 app.patch('/updateNotes/:noteId', isAuthenticated, can('edit_note_content'), async (req, res) => {
     const session = await mongoose.startSession();
