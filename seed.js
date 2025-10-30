@@ -19,6 +19,7 @@ const seedDatabase = async () => {
             { name: 'edit_note_content', description: 'Allows editing the content and title of a note' },
             { name: 'delete_note', description: 'Allows deleting a note' },
             { name: 'manage_contributors', description: 'Allows adding, removing, and changing roles of contributors' },
+            { name: 'add_comments', description: 'Allows adding comments to a note' },
         ];
         const createdPermissions = await Permission.insertMany(permissions);
         console.log('Permissions seeded.');
@@ -38,14 +39,23 @@ const seedDatabase = async () => {
                 permissions: [permissionMap.read_note],
             },
             {
+                name: 'Commenter',
+                description: 'Can view and comment on the note.',
+                permissions: [permissionMap.read_note, permissionMap.add_comments],
+            },
+            {
                 name: 'Editor',
                 description: 'Can view and edit the note content.',
-                permissions: [permissionMap.read_note, permissionMap.edit_note_content],
+                permissions: [
+                    permissionMap.read_note, 
+                    permissionMap.edit_note_content, 
+                    permissionMap.add_comments
+                ],
             },
             {
                 name: 'Manager',
                 description: 'Can view, edit, and manage contributors.',
-                permissions: [permissionMap.read_note, permissionMap.edit_note_content, permissionMap.manage_contributors],
+                permissions: [permissionMap.read_note, permissionMap.edit_note_content, permissionMap.manage_contributors, permissionMap.add_comments],
             },
             {
                 name: 'Owner',
@@ -55,6 +65,7 @@ const seedDatabase = async () => {
                     permissionMap.edit_note_content,
                     permissionMap.delete_note,
                     permissionMap.manage_contributors,
+                    permissionMap.add_comments,
                 ],
             },
         ];

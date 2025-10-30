@@ -28,6 +28,7 @@ import Invitation from './model/invitation.js';
 import User from './model/user.js';
 import Note from './model/note.js'; // Import Note model for updates
 import NoteVersion from './model/NoteVersion.js';
+import Comment from './model/comment.js';
 const userRepository = new UserRepository();
 
 const app = express();
@@ -387,6 +388,89 @@ app.post('/addNotes', isAuthenticated, async (req, res) => {
         session.endSession();
     }
 });
+
+
+/**
+ * Creates a new comment on a note. Can also be a reply to another comment.
+ * The user must be authenticated and have at least 'read_note' permission.
+ */
+app.post('/notes/:noteId/comments', isAuthenticated, can('add_comments'), async (req, res) => {
+    try {
+        // 1. Get fields from their correct sources.
+        const { noteId } = req.params;
+        const authorId = req.user.id;
+        const { content, parentCommentId } = req.body;
+
+        // 2. Validate input.
+        if (!content) {
+            return res.status(400).json({ error: 'Comment content cannot be empty.' });
+        }
+
+        // 3. If it's a reply, validate the parent comment.
+        if (parentCommentId) {
+            const parentComment = await Comment.findById(parentCommentId);
+            if (!parentComment || parentComment.noteId.toString() !== noteId) {
+                return res.status(400).json({ error: 'Invalid parentCommentId: The parent comment does not exist or does not belong to this note.' });
+            }
+        }
+
+        // 4. Create the new comment object.
+        const newCommentData = {
+            noteId,
+            authorId,
+            content,
+            parentCommentId: parentCommentId || null // Set to null if it's a top-level comment
+        };
+
+        let createdComment = await Comment.create(newCommentData);
+
+        // 6. Populate the author's name for a richer response.
+        createdComment = await createdComment.populate('authorId', 'name email');
+
+        res.status(201).json(createdComment);
+    } catch (error) {
+        console.log('failed to add comment:', error);
+        return res.status(500).json({error: 'failed to add comment'});
+    }
+});
+
+
+/**
+ * Updates an existing comment.
+ * The user must be authenticated and must be the author of the comment.
+ */
+app.patch('/notes/:noteId/comments/:commentId', isAuthenticated, can('read_note'), async (req, res) => {
+    try {
+        const { noteId, commentId } = req.params;
+        const { content } = req.body;
+        const authorId = req.user.id;
+
+        if (!content) {
+            return res.status(400).json({ error: 'Comment content cannot be empty.' });
+        }
+
+        // Find the comment and ensure the user is the author.
+        const comment = await Comment.findOne({ _id: commentId, noteId: noteId });
+
+        if (!comment) {
+            return res.status(404).json({ error: 'Comment not found or it does not belong to this note.' });
+        }
+
+        if (comment.authorId.toString() !== authorId) {
+            return res.status(403).json({ error: 'Forbidden: You can only edit your own comments.' });
+        }
+
+        // Update the comment content and return the updated document.
+        const updatedComment = await Comment.findByIdAndUpdate(commentId, { content }, { new: true }).populate('authorId', 'name email');
+        res.status(200).json(updatedComment);
+    } catch (error) {
+        console.error('Failed to update comment:', error);
+        res.status(500).json({ error: 'Failed to update comment.' });
+    }
+});
+
+
+
 
 /**
  * Performs a full-text search across the title and content of notes
